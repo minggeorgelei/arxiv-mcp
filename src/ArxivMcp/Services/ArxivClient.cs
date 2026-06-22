@@ -21,15 +21,17 @@ public class ArxivClient(HttpClient http, ArxivGate gate, ILogger<ArxivClient> l
     // Namespaces used by the Atom feed.
     private static readonly XNamespace Atom = "http://www.w3.org/2005/Atom";
     private static readonly XNamespace Arxiv = "http://arxiv.org/schemas/atom";
+    private static readonly XNamespace OpenSearch = "http://a9.com/-/spec/opensearch/1.1/";
 
     /// <summary>
     /// Searches papers. The query supports arXiv field prefixes (ti:/au:/abs:/cat:/all: ...)
     /// and AND/OR/ANDNOT; when category is provided, "AND cat:{category}" is appended.
     /// </summary>
-    public async Task<IReadOnlyList<ArxivPaper>> SearchAsync(
+    public async Task<ArxivSearchResult> SearchAsync(
         string query,
         string? category = null,
         int maxResults = 10,
+        int start = 0,
         string sortBy = "relevance",
         string sortOrder = "descending",
         CancellationToken cancellationToken = default)
@@ -40,12 +42,13 @@ public class ArxivClient(HttpClient http, ArxivGate gate, ILogger<ArxivClient> l
 
         var url = "api/query"
             + $"?search_query={HttpUtility.UrlEncode(searchQuery)}"
+            + $"&start={Math.Max(start, 0)}"
             + $"&max_results={Math.Clamp(maxResults, 1, 50)}"
             + $"&sortBy={MapSortBy(sortBy)}"
             + $"&sortOrder={MapSortOrder(sortOrder)}";
 
-        logger.LogInformation("arXiv search: query={Query} category={Category} max={Max}",
-            query, category, maxResults);
+        logger.LogInformation("arXiv search: query={Query} category={Category} start={Start} max={Max}",
+            query, category, start, maxResults);
 
         var xml = await GetStringThrottledAsync(url, cancellationToken);
         return ParseFeed(xml);
@@ -130,14 +133,27 @@ public class ArxivClient(HttpClient http, ArxivGate gate, ILogger<ArxivClient> l
     private static string MapSortOrder(string sortOrder) =>
         sortOrder.Equals("ascending", StringComparison.OrdinalIgnoreCase) ? "ascending" : "descending";
 
-    private static List<ArxivPaper> ParseFeed(string xml)
+    private static ArxivSearchResult ParseFeed(string xml)
     {
         var doc = XDocument.Parse(xml);
-        return doc.Root?
+        var root = doc.Root;
+
+        var papers = root?
             .Elements(Atom + "entry")
             .Select(ParseEntry)
             .ToList() ?? [];
+
+        return new ArxivSearchResult
+        {
+            TotalResults = ParseInt(root?.Element(OpenSearch + "totalResults")),
+            StartIndex = ParseInt(root?.Element(OpenSearch + "startIndex")),
+            ItemsPerPage = ParseInt(root?.Element(OpenSearch + "itemsPerPage")),
+            Papers = papers,
+        };
     }
+
+    private static int ParseInt(XElement? element) =>
+        int.TryParse((string?)element, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : 0;
 
     private static ArxivPaper ParseEntry(XElement entry)
     {
