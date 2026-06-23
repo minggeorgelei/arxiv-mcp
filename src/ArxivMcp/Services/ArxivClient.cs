@@ -55,6 +55,43 @@ public class ArxivClient(HttpClient http, ArxivGate gate, ILogger<ArxivClient> l
     }
 
     /// <summary>
+    /// Fetches full metadata for one or more papers by arXiv id (via id_list). Each id may include
+    /// a version suffix (e.g. 2101.00001v2) and an optional "arXiv:" prefix; both are accepted.
+    /// Ids that don't resolve to a paper are simply omitted from the result.
+    /// </summary>
+    public async Task<IReadOnlyList<ArxivPaper>> GetPapersAsync(
+        IReadOnlyList<string> ids,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = (ids ?? [])
+            .Select(NormalizeId)
+            .Where(s => s.Length > 0)
+            .ToList();
+
+        if (normalized.Count == 0)
+            return [];
+
+        var idList = string.Join(",", normalized);
+        var url = $"api/query?id_list={HttpUtility.UrlEncode(idList)}&max_results={normalized.Count}";
+
+        logger.LogInformation("arXiv get_paper: ids={Ids}", idList);
+
+        var xml = await GetStringThrottledAsync(url, cancellationToken);
+
+        // A malformed id yields a placeholder "error" entry rather than a real paper; drop those.
+        return [..ParseFeed(xml).Papers.Where(p => !p.AbsUrl.Contains("/api/errors", StringComparison.OrdinalIgnoreCase))];
+    }
+
+    /// <summary>Strips an optional "arXiv:" prefix and surrounding whitespace from an id.</summary>
+    private static string NormalizeId(string id)
+    {
+        var trimmed = (id ?? "").Trim();
+        return trimmed.StartsWith("arxiv:", StringComparison.OrdinalIgnoreCase)
+            ? trimmed["arxiv:".Length..].Trim()
+            : trimmed;
+    }
+
+    /// <summary>
     /// Fetches a URL through the global gate. Retries 429/503/connection failures with
     /// exponential backoff (5s/15s/45s); 429 prefers the Retry-After header. The backoff is
     /// written into the gate's schedule, so re-entering the gate is what enforces the wait —
