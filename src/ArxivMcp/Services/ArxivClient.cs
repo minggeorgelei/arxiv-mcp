@@ -82,6 +82,117 @@ public class ArxivClient(HttpClient http, ArxivGate gate, ILogger<ArxivClient> l
         return [..ParseFeed(xml).Papers.Where(p => !p.AbsUrl.Contains("/api/errors", StringComparison.OrdinalIgnoreCase))];
     }
 
+    // A single MCP response can't hold a whole long paper, so the body is paged: each call returns at
+    // most this many characters starting at the requested offset, with NextStart pointing at the rest.
+    // The page is HTML, and JSON-escaping (tags -> \" , LaTeX backslashes -> \\) inflates it by ~1.4x,
+    // so these are kept well below the response token limit; callers page through via 'start'.
+    private const int DefaultMaxChars = 15_000;
+    private const int HardMaxChars = 20_000;
+
+    /// <summary>
+    /// Fetches the HTML version of a paper and extracts its body text, trying arxiv.org/html first
+    /// and falling back to ar5iv. These hosts are not the API gateway, so the fetches bypass
+    /// <see cref="ArxivGate"/>; each gets its own short retry on 5xx/connection errors. When neither
+    /// host has an HTML version, returns <c>Source = "none"</c> with a link to the (unparsed) PDF.
+    /// </summary>
+    public async Task<ExtractedText> ExtractTextAsync(
+        string id, int start = 0, int? maxChars = null, CancellationToken cancellationToken = default)
+    {
+        var normalized = NormalizeId(id);
+        if (normalized.Length == 0)
+            throw new ArxivUnavailableException("No arXiv id was provided.");
+
+        var pageSize = Math.Clamp(maxChars ?? DefaultMaxChars, 1, HardMaxChars);
+
+        (string Source, string Url)[] attempts =
+        [
+            ("arxiv-html", $"https://arxiv.org/html/{normalized}"),
+            ("ar5iv", $"https://ar5iv.labs.arxiv.org/html/{normalized}"),
+        ];
+
+        foreach (var (source, url) in attempts)
+        {
+            var html = await TryFetchHtmlAsync(url, cancellationToken);
+            if (html is null)
+                continue;
+
+            var text = HtmlExtractor.ExtractMainHtml(html);
+            if (text.Length == 0)
+                continue;
+
+            var from = Math.Clamp(start, 0, text.Length);
+            var to = Math.Min(from + pageSize, text.Length);
+            var hasMore = to < text.Length;
+
+            logger.LogInformation(
+                "extract_text: id={Id} source={Source} chars={Chars} start={Start} returned={Returned}",
+                normalized, source, text.Length, from, to - from);
+
+            return new ExtractedText
+            {
+                Id = normalized,
+                Source = source,
+                Text = text[from..to],
+                CharCount = text.Length,
+                Start = from,
+                Truncated = hasMore,
+                NextStart = hasMore ? to : null,
+            };
+        }
+
+        var pdfUrl = $"https://arxiv.org/pdf/{normalized}";
+        logger.LogInformation("extract_text: id={Id} source=none (no HTML version)", normalized);
+
+        return new ExtractedText
+        {
+            Id = normalized,
+            Source = "none",
+            PdfUrl = pdfUrl,
+            Message = $"No HTML version of {normalized} was found. The PDF is not parsed; see {pdfUrl}.",
+        };
+    }
+
+    /// <summary>
+    /// Fetches an HTML page outside the API gate. Returns null when the page doesn't exist (404/410)
+    /// or stays unavailable after one retry on 5xx/connection errors — the caller treats null as
+    /// "this source has no HTML" and moves on.
+    /// </summary>
+    private async Task<string?> TryFetchHtmlAsync(string url, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                using var response = await http.GetAsync(url, cancellationToken);
+
+                if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone)
+                    return null;
+
+                if ((int)response.StatusCode >= 500)
+                {
+                    logger.LogWarning("HTML fetch {Url} returned {Status} (attempt {Attempt}/2)",
+                        url, (int)response.StatusCode, attempt + 1);
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                    return null;
+
+                return await response.Content.ReadAsStringAsync(cancellationToken);
+            }
+            catch (HttpRequestException ex)
+            {
+                logger.LogWarning("HTML fetch {Url} failed (attempt {Attempt}/2): {Reason}", url, attempt + 1, ex.Message);
+            }
+            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogWarning("HTML fetch {Url} timed out (attempt {Attempt}/2)", url, attempt + 1);
+            }
+        }
+
+        return null;
+    }
+
     /// <summary>Strips an optional "arXiv:" prefix and surrounding whitespace from an id.</summary>
     private static string NormalizeId(string id)
     {
