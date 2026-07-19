@@ -77,6 +77,3 @@ jobs:
 
             If there are no significant problems:
             say "No major architectural concerns found."
-
-
-          exclude-patterns: "package-lock.json,pnpm-lock.yaml,yarn.lock,*.min.js"
