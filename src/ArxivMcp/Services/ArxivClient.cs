@@ -153,6 +153,92 @@ public class ArxivClient(HttpClient http, ArxivGate gate, ILogger<ArxivClient> l
     }
 
     /// <summary>
+    /// Downloads the PDF of an arXiv paper to disk. The fetch targets https://arxiv.org/pdf/{id},
+    /// which is a different host from the API gateway, so it bypasses <see cref="ArxivGate"/> (the
+    /// 3s courtesy throttle only applies to export.arxiv.org). One retry is attempted on 5xx or
+    /// connection errors; 4xx is terminal. The body is streamed straight to disk to avoid holding
+    /// potentially-large PDFs in memory.
+    /// </summary>
+    public async Task<DownloadedPdf> DownloadPdfAsync(
+        string id, string? outputDirectory = null, CancellationToken cancellationToken = default)
+    {
+        var normalized = NormalizeId(id);
+        if (normalized.Length == 0)
+            throw new ArxivUnavailableException("No arXiv id was provided.");
+
+        var pdfUrl = $"https://arxiv.org/pdf/{normalized}";
+
+        // Default to a 'downloads' folder under the server's working directory; create on demand.
+        var targetDir = string.IsNullOrWhiteSpace(outputDirectory)
+            ? Path.Combine(Directory.GetCurrentDirectory(), "downloads")
+            : outputDirectory;
+        Directory.CreateDirectory(targetDir);
+        var filePath = Path.GetFullPath(Path.Combine(targetDir, $"{normalized}.pdf"));
+
+        logger.LogInformation("download_pdf: id={Id} url={Url} path={Path}", normalized, pdfUrl, filePath);
+
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                using var response = await http.GetAsync(pdfUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+                // 4xx: paper doesn't exist (or the PDF isn't served). No point retrying.
+                if ((int)response.StatusCode is >= 400 and < 500)
+                    throw new ArxivUnavailableException(
+                        $"Failed to download PDF for {normalized}: arXiv replied {(int)response.StatusCode} {response.StatusCode}.");
+
+                if ((int)response.StatusCode >= 500)
+                {
+                    logger.LogWarning("PDF download {Url} returned {Status} (attempt {Attempt}/2)",
+                        pdfUrl, (int)response.StatusCode, attempt + 1);
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+
+                // Stream the body straight to disk so even very large papers don't sit in memory.
+                long size;
+                await using (var fs = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    await response.Content.CopyToAsync(fs, cancellationToken);
+                    size = fs.Length;
+                }
+
+                if (size == 0)
+                {
+                    try { File.Delete(filePath); } catch { /* best-effort cleanup */ }
+                    throw new ArxivUnavailableException(
+                        $"PDF download for {normalized} produced an empty file.");
+                }
+
+                logger.LogInformation(
+                    "download_pdf: id={Id} saved {Bytes} bytes to {Path}", normalized, size, filePath);
+
+                return new DownloadedPdf
+                {
+                    Id = normalized,
+                    Url = pdfUrl,
+                    FilePath = filePath,
+                    SizeBytes = size,
+                };
+            }
+            catch (HttpRequestException ex)
+            {
+                logger.LogWarning("PDF download {Url} failed (attempt {Attempt}/2): {Reason}",
+                    pdfUrl, attempt + 1, ex.Message);
+            }
+            catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                logger.LogWarning("PDF download {Url} timed out (attempt {Attempt}/2)", pdfUrl, attempt + 1);
+            }
+        }
+
+        throw new ArxivUnavailableException(
+            $"PDF download for {normalized} failed after multiple attempts. Please try again shortly.");
+    }
+
+    /// <summary>
     /// Fetches an HTML page outside the API gate. Returns null when the page doesn't exist (404/410)
     /// or stays unavailable after one retry on 5xx/connection errors — the caller treats null as
     /// "this source has no HTML" and moves on.
