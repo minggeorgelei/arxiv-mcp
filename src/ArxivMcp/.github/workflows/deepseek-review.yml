@@ -1,0 +1,86 @@
+name: DeepSeek Architecture Review
+
+on:
+  pull_request_target:
+    types:
+      - labeled
+
+
+permissions:
+  contents: read
+  pull-requests: write
+
+
+jobs:
+
+  deepseek-review:
+
+    if: github.event.label.name == 'ai-review'
+
+    runs-on: ubuntu-latest
+
+
+    steps:
+
+      - name: DeepSeek Architecture Review
+
+        uses: hustcer/deepseek-review@v1.20
+
+        with:
+
+          chat-token: ${{ secrets.CHAT_TOKEN }}
+
+          model: deepseek-v4-pro
+
+          base-url: https://api.deepseek.com
+
+
+          temperature: 0.2
+
+
+          sys-prompt: |
+            You are a senior software architect.
+
+            Review this Pull Request.
+
+            Focus on:
+
+            - architecture impact
+            - design patterns
+            - coupling
+            - abstraction quality
+            - concurrency issues
+            - async problems
+            - performance issues
+            - maintainability
+
+
+            Ignore:
+
+            - formatting
+            - naming
+            - lint issues
+            - trivial refactoring
+
+
+            Only report important production risks.
+
+
+          user-prompt: |
+            Analyze this PR.
+
+            Provide:
+
+            1. Architecture summary
+            2. Potential risks
+            3. Recommended improvements
+
+            If there are no significant problems:
+            say "No major architectural concerns found."
+
+
+          exclude-patterns: |
+            package-lock.json,
+            pnpm-lock.yaml,
+            yarn.lock,
+            *.min.js
