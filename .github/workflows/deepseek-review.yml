@@ -1,86 +1,22 @@
-name: DeepSeek Architecture Review
-
+name: Code Review
 on:
   pull_request_target:
     types:
-      - labeled
+      - labeled # Triggers when a label is added to the PR
 
-
+# fix: GraphQL: Resource not accessible by integration (addComment) error
 permissions:
-  contents: read
   pull-requests: write
 
-
 jobs:
-
-  deepseek-review:
-
-    if: github.event.label.name == 'ai-review'
-
+  setup-deepseek-review:
+    timeout-minutes: 30
     runs-on: ubuntu-latest
-
-
+    name: Code Review
+    # Make sure the code review happens only when the PR has the label 'ai-review'
+    if: contains(github.event.pull_request.labels.*.name, 'ai-review')
     steps:
-
-      - name: DeepSeek Architecture Review
-
+      - name: DeepSeek Code Review
         uses: hustcer/deepseek-review@v1.20
-
         with:
-
           chat-token: ${{ secrets.CHAT_TOKEN }}
-
-          model: deepseek-v4-pro
-
-          base-url: https://api.deepseek.com
-
-
-          temperature: 0.2
-
-
-          sys-prompt: |
-            You are a senior software architect.
-
-            Review this Pull Request.
-
-            Focus on:
-
-            - architecture impact
-            - design patterns
-            - coupling
-            - abstraction quality
-            - concurrency issues
-            - async problems
-            - performance issues
-            - maintainability
-
-
-            Ignore:
-
-            - formatting
-            - naming
-            - lint issues
-            - trivial refactoring
-
-
-            Only report important production risks.
-
-
-          user-prompt: |
-            Analyze this PR.
-
-            Provide:
-
-            1. Architecture summary
-            2. Potential risks
-            3. Recommended improvements
-
-            If there are no significant problems:
-            say "No major architectural concerns found."
-
-
-          exclude-patterns: |
-            package-lock.json,
-            pnpm-lock.yaml,
-            yarn.lock,
-            *.min.js
